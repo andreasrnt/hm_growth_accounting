@@ -1,0 +1,337 @@
+version: 2
+
+sources:
+  - name: heymax
+    database: my-project-2025-473416
+    schema: heymax
+    tables:
+      - name: event_stream
+        description: Raw event stream from HeyMax platform
+        columns:
+          - name: user_id
+            description: Unique identifier for the user
+            tests:
+              - not_null
+          - name: event_time
+            description: Timestamp of the event
+            tests:
+              - not_null
+          - name: event_type
+            description: Type of event (miles_earned, miles_redeemed, reward_search, like, share)
+            tests:
+              - not_null
+          - name: miles_amount
+            description: Miles amount associated with the event, nullable for non-transaction events
+          - name: platform
+            description: Platform the event was fired from (ios, android, web)
+          - name: utm_source
+            description: UTM source for acquisition tracking, defaults to unknown
+          - name: country
+            description: Country code of the user (MY, PH, TH, ID, SG)
+          - name: gender
+            description: Gender of the user, defaults to unknown
+
+models:
+  # ============================================================
+  # STAGING
+  # ============================================================
+  - name: stg_event_stream
+    description: >
+      Cleaned and deduplicated event stream from the raw HeyMax source table.
+      Normalizes strings, casts types, adds date grain columns, and removes
+      duplicate events on (user_id, event_time).
+    columns:
+      - name: event_id
+        description: Surrogate key derived from CONCAT(user_id, formatted event_time). Unique per event.
+        tests:
+          - not_null
+      - name: user_id
+        description: Trimmed user identifier. Not null enforced at source filter.
+        tests:
+          - not_null
+      - name: event_time
+        description: Timestamp of the event, cast from source.
+        tests:
+          - not_null
+      - name: event_date
+        description: Date of the event.
+        tests:
+          - not_null
+      - name: event_week
+        description: ISO week start date (Monday) of the event.
+        tests:
+          - not_null
+      - name: event_month
+        description: First day of the month of the event.
+        tests:
+          - not_null
+      - name: event_type
+        description: Normalized (lowercase, trimmed) event type.
+        tests:
+          - not_null
+      - name: platform
+        description: Normalized platform (lowercase, trimmed).
+      - name: country
+        description: Uppercased country code.
+      - name: utm_source
+        description: Normalized UTM source, defaults to unknown when null.
+        tests:
+          - not_null
+      - name: gender
+        description: Normalized gender, defaults to unknown when null.
+        tests:
+          - not_null
+      - name: miles_amount
+        description: Miles amount cast to FLOAT64. Nullable for non-transaction events.
+      - name: transaction_category
+        description: >
+          Transaction category for miles events. Nullable for non-transaction events.
+          Known values: apple, dining, ecommerce, flight, hotel, lululemon, shopee, shopping.
+
+  # ============================================================
+  # MARTS
+  # ============================================================
+  - name: dim_user
+    description: >
+      SCD-1 user dimension. One row per user. Captures first touch attributes
+      (cohort date, acquisition channel, platform, country) and latest touch
+      attributes (gender, country, platform). Includes lifetime activity aggregates
+      and user tier classification.
+      Assumption: gender and country reflect the latest known value, not acquisition-time value.
+      Assumption: user_tier thresholds are Gold >= 10 events over 2+ months,
+      Silver >= 5 events over 2+ months, Bronze >= 3 events, else New.
+    columns:
+      - name: user_id
+        description: Natural key. Unique per user.
+        tests:
+          - not_null
+          - unique
+      - name: first_event_date
+        description: Date of the user's first ever event. Used as cohort date.
+      - name: first_event_month
+        description: Month of the user's first ever event. Used as cohort month.
+      - name: acquisition_channel
+        description: UTM source at first touch. Reflects acquisition channel.
+      - name: acquisition_platform
+        description: Platform at first touch.
+      - name: gender
+        description: Gender from latest touch event.
+      - name: country
+        description: Country from latest touch event.
+      - name: platform
+        description: Platform from latest touch event.
+      - name: last_event_date
+        description: Date of the user's most recent event.
+      - name: user_lifespan_days
+        description: Days between first and last event date.
+      - name: first_transaction_date
+        description: Date of first miles_earned or miles_redeemed event. Null if never transacted.
+      - name: days_to_first_transaction
+        description: Days from first event to first transaction. Null if never transacted.
+      - name: is_transacting_user
+        description: True if user has at least one transaction event.
+      - name: total_events
+        description: Lifetime total event count.
+      - name: active_days
+        description: Count of distinct days with at least one event.
+      - name: active_months
+        description: Count of distinct months with at least one event.
+      - name: miles_earned
+        description: Lifetime total miles earned.
+      - name: miles_redeemed
+        description: Lifetime total miles redeemed.
+      - name: net_miles_balance
+        description: miles_earned minus miles_redeemed.
+      - name: user_tier
+        description: >
+          Engagement tier. Gold = active 2+ months with 10+ events,
+          Silver = active 2+ months with 5+ events,
+          Bronze = 3+ events, New = all others.
+
+  - name: fct_events
+    description: >
+      Enriched event fact table. One row per event. Joins stg_event_stream
+      with dim_user to add user-level attributes and cohort context.
+      Incremental model partitioned by event_date — daily runs process
+      the last 3 days to account for late-arriving events.
+      Assumption: events with no matching user_id in dim_user are excluded (INNER JOIN).
+    columns:
+      - name: event_id
+        description: Surrogate key. Unique per event.
+        tests:
+          - not_null
+          - unique
+      - name: user_id
+        description: Foreign key to dim_user.
+        tests:
+          - not_null
+      - name: event_date
+        description: Date of the event. Used as partition key.
+        tests:
+          - not_null
+      - name: event_type
+        description: Type of event.
+      - name: miles_amount
+        description: Miles amount, coalesced to 0 for non-transaction events.
+      - name: is_transactional
+        description: True if event_type is miles_earned or miles_redeemed.
+      - name: is_earning
+        description: True if event_type is miles_earned.
+      - name: is_redemption
+        description: True if event_type is miles_redeemed.
+      - name: is_social
+        description: True if event_type is like or share.
+      - name: is_discovery
+        description: True if event_type is reward_search.
+
+  - name: fct_growth_daily
+    description: >
+      Daily growth accounting. One row per user per active day plus one
+      synthetic Churned row per user per day they were active but not the
+      following day. Classifications: New = first ever active day,
+      Retained = active on consecutive days, Resurrected = active after a gap,
+      Churned = synthetic row for the day after last activity.
+      Assumption: Churned rows may have activity_date beyond the dataset end date.
+    columns:
+      - name: user_id
+        description: User identifier.
+        tests:
+          - not_null
+      - name: activity_date
+        description: Date of activity or synthetic churn date.
+        tests:
+          - not_null
+      - name: first_period_date
+        description: User's first ever active date. Used to identify New classification.
+        tests:
+          - not_null
+      - name: user_classification
+        description: Growth accounting classification for the period.
+        tests:
+          - not_null
+      - name: period
+        description: Date grain identifier. Always 'Daily' for this model.
+        tests:
+          - not_null
+
+  - name: fct_growth_weekly
+    description: >
+      Weekly growth accounting. Same logic as fct_growth_daily but at week grain.
+      activity_date is truncated to Monday of each week.
+      Retained = active in consecutive weeks (DATE_DIFF = 1 WEEK).
+    columns:
+      - name: user_id
+        description: User identifier.
+        tests:
+          - not_null
+      - name: activity_date
+        description: Week start date (Monday) of activity or synthetic churn week.
+        tests:
+          - not_null
+      - name: first_period_date
+        description: User's first ever active week start date.
+        tests:
+          - not_null
+      - name: user_classification
+        description: Growth accounting classification for the period.
+        tests:
+          - not_null
+      - name: period
+        description: Date grain identifier. Always 'Weekly' for this model.
+        tests:
+          - not_null
+
+  - name: fct_growth_monthly
+    description: >
+      Monthly growth accounting. Same logic as fct_growth_daily but at month grain.
+      activity_date is truncated to first day of each month.
+      Retained = active in consecutive months (DATE_DIFF = 1 MONTH).
+    columns:
+      - name: user_id
+        description: User identifier.
+        tests:
+          - not_null
+      - name: activity_date
+        description: Month start date of activity or synthetic churn month.
+        tests:
+          - not_null
+      - name: first_period_date
+        description: User's first ever active month start date.
+        tests:
+          - not_null
+      - name: user_classification
+        description: Growth accounting classification for the period.
+        tests:
+          - not_null
+      - name: period
+        description: Date grain identifier. Always 'Monthly' for this model.
+        tests:
+          - not_null
+
+  - name: fct_growth_agg
+    description: >
+      Aggregated engagement metrics by activity period, grain, and user segments.
+      One row per combination of activity_period, period, transaction_category,
+      acquisition_channel, country, platform, and gender.
+      Miles metrics reflect period-specific activity, not lifetime totals.
+      Used as the primary data source for Tableau engagement and segmentation charts.
+    columns:
+      - name: activity_period
+        description: Start date of the period (day, week, or month depending on grain).
+        tests:
+          - not_null
+      - name: period
+        description: Date grain identifier.
+      - name: total_user
+        description: Count of distinct users active in the period and segment.
+      - name: total_miles_earned
+        description: Total miles earned in the period. Period-specific, not lifetime.
+      - name: total_miles_redeemed
+        description: Total miles redeemed in the period. Period-specific, not lifetime.
+      - name: earning_events
+        description: Count of miles_earned events in the period.
+      - name: redemption_events
+        description: Count of miles_redeemed events in the period.
+      - name: social_events
+        description: Count of like and share events in the period.
+      - name: discovery_events
+        description: Count of reward_search events in the period.
+      - name: miles_in_period
+        description: Total miles amount (earned + redeemed) in the period.
+
+  # ============================================================
+  # METRICS
+  # ============================================================
+  - name: fct_cohort
+    description: >
+      Consecutive cohort retention. One row per cohort_period, period, and
+      retained_period combination. A new cohort starts every time a user has
+      a gap greater than 1 period (New or Resurrected). Supports Weekly and
+      Monthly grains. Used for the cohort retention triangle in Tableau.
+      Assumption: cohort resets on every churn event, not fixed at first ever activity.
+    columns:
+      - name: period
+        description: Date grain identifier.
+        tests:
+          - not_null
+      - name: cohort_period
+        description: Start date of the cohort period. Partition key.
+      - name: cohort_label
+        description: String formatted cohort period (YYYY-MM-DD) for display.
+      - name: retained_period
+        description: String formatted retained period date for display.
+      - name: periods_since_cohort
+        description: >
+          Number of periods elapsed since cohort start.
+          0 = cohort period itself, 1 = one period later, etc.
+      - name: total_users_first_period
+        description: Total distinct users in the cohort at period 0.
+      - name: total_users_retained_period
+        description: Total distinct users from the cohort still active in this period.
+      - name: retention_rate
+        description: >
+          Percentage of cohort users retained in this period.
+          Calculated as (total_users_retained_period / total_users_first_period) * 100.
+          Rounded to 1 decimal place.
+        tests:
+          - not_null
