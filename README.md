@@ -31,6 +31,24 @@ git clonehttps://github.com/andreasrnt/hm_growth_accounting.git
 cd hm_growth_accounting
 ```
 
+### Alternative — Run Locally with Seed Data
+
+You can load the bundled CSV directly into your warehouse using dbt seed:
+
+1. Skip BigQuery on step 1 above
+2. Load the seed data:
+```bash
+dbt seed
+```
+3. Then run the full pipeline:
+```bash
+dbt build
+```
+
+This loads `seeds/event_stream.csv` into `heymax.event_stream` and runs
+all models and tests against it. No access to the production source table required.
+
+
 Create a `profiles.yml` in `~/.dbt/`:
 ```yaml
 growth_accounting:
@@ -66,9 +84,6 @@ dbt docs serve
 
 Open `http://localhost:8080` to browse model documentation.
 
-### 5. Dashboard
-
-View the live Tableau dashboard here: https://public.tableau.com/app/profile/andreas.rinanto2835/viz/AndreasRinanto-GrowthEngagementDashboard/GrowthEngagementDashboard
 
 ---
 
@@ -77,7 +92,7 @@ View the live Tableau dashboard here: https://public.tableau.com/app/profile/and
 ```
 ├── .github/
 │   └── workflows/
-│       └── ci.yml              # GitHub Actions — runs dbt parse on every push
+│       └── ci.yml
 ├── models/
 │   ├── staging/
 │   │   └── stg_event_stream.sql
@@ -90,12 +105,16 @@ View the live Tableau dashboard here: https://public.tableau.com/app/profile/and
 │   │   └── fct_growth_agg.sql
 │   └── metrics/
 │       └── fct_cohort.sql
+│   └── schema.yml
 ├── tests/
 │   ├── no_duplicate_users.sql
 │   ├── no_negative_miles.sql
+├── seeds/
+│   ├── event_stream.csv
+├── AGENTDESIGN.md
 ├── dbt_project.yml
-├── schema.yml
-└── README.md
+├── README.md
+└── REFLECTION.md
 ```
 
 ---
@@ -103,10 +122,10 @@ View the live Tableau dashboard here: https://public.tableau.com/app/profile/and
 ## Data Model
 
 ```
-heymax.event_stream          <- raw source
+heymax.event_stream
         │
         ▼
-stg_event_stream             <- cleaned, deduplicated, typed
+stg_event_stream
         │
         ├──────────────────► dim_user
         │                        │
@@ -178,6 +197,8 @@ The Tableau dashboard covers five sections:
 
 KPI cards show the latest full period snapshot. The period switcher (Daily / Weekly / Monthly) controls all trend charts simultaneously.
 
+View the live Tableau dashboard here: https://public.tableau.com/app/profile/andreas.rinanto2835/viz/AndreasRinanto-GrowthEngagementDashboard/GrowthEngagementDashboard
+
 ---
 
 ## CI/CD
@@ -192,19 +213,17 @@ To extend CI to run full `dbt test` on push, add BigQuery service account creden
 
 - **Dataset ends December 2025** — the final period (Dec 2025) is a partial month with only 1 day of data. KPI cards use the latest full period (Nov 2025) to avoid misleading numbers
 - **New user acquisition stops after June 2025** — the dataset shows no new users after this point, which is reflected in the growth accounting chart as a real data pattern, not a bug
-- **event_id collision risk** — the current surrogate key truncates to second precision. If two events from the same user fire within the same second, one is deduplicated. A future improvement would use `FARM_FINGERPRINT` with microsecond precision
+- **event_id collision risk** — the current surrogate key truncates to second precision. If two events from the same user fire within the same second, one is deduplicated.
 - **User tier thresholds are heuristic** — Bronze/Silver/Gold thresholds are based on reasonable assumptions about engagement levels, not business-defined criteria
 - **fct_growth_agg triples storage** — unioning three grains into one model triples the row count. At scale this would be replaced with grain-specific aggregation models or a semantic layer
 
 ---
 
-## What I Would Do With More Time
+## What I Would Do With More Time and Have The Access
 
 - Add a streaming ingestion layer (Pub/Sub → BigQuery) to replace daily batch
 - Implement dbt snapshots for true SCD-2 user history
 - Add a logging framework to track model run times and row counts
-- Containerize the pipeline with Docker for fully reproducible local runs
-- Add Looker or Metabase as an alternative to Tableau for easier sharing
 - Extend CI to run full `dbt test` on every PR with BigQuery service account auth
 
 ---
