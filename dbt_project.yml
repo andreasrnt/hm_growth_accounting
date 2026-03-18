@@ -28,3 +28,11 @@ models:
     metrics:
       +materialized: table
       +schema: metrics
+
+seeds:
+  growth_accounting:
+    event_stream:
+      +schema: heymax
+      +column_types:
+        event_time: timestamp
+        miles_amount: float64

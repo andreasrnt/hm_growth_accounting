@@ -6,7 +6,10 @@ sources:
     schema: heymax
     tables:
       - name: event_stream
-        description: Raw event stream from HeyMax platform
+        description: >
+              Raw event stream from HeyMax platform. Can be loaded via
+              `dbt seed` using the bundled CSV in the seeds/ folder,
+              or connected directly to the production BigQuery table.
         columns:
           - name: user_id
             description: Unique identifier for the user
